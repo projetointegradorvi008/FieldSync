@@ -6,131 +6,6 @@ técnica completa em [`docs/FieldSync_Especificacao_Tecnica.md`](docs/FieldSync_
 Para uma descrição de cada pasta e cada arquivo do projeto, ver
 [`docs/FieldSync_Detalhamento_Estrutura_Projeto.md`](docs/FieldSync_Detalhamento_Estrutura_Projeto.md).
 
-> **Status atual:** MVP completo — autenticação e usuários, gestão e
-> publicação versionada de pesquisas, construtor de formulários e coleta
-> offline-first, sincronização com detecção de conflito, dashboard/analytics
-> com mapas e exportação, e o polimento de testes/segurança/deploy descrito
-> nas seções abaixo.
->
-> - **Autenticação e Usuários** — login/refresh/logout com JWT + Argon2id,
->   rotação de refresh token com detecção de reuso, sessão única por usuário
->   (validada em toda requisição, não só no refresh — um novo login revoga
->   imediatamente qualquer sessão anterior), RBAC por hierarquia de perfis
->   (ROOT/ADMINISTRADOR/GESTOR/SUPERVISOR/PESQUISADOR/VISUALIZADOR), gestão de
->   sessões (listar/revogar por dispositivo) e CRUD de usuários — implementado
->   no Backend, Web (BFF com cookie httpOnly) e Mobile (SecureStore +
->   interceptor HTTP com refresh automático e logout forçado ao detectar
->   sessão revogada); no Mobile, logo após o primeiro login, uma tela avisa
->   sobre a coleta de dados (localização e, quando aplicável, nome do
->   entrevistado) para fins de LGPD (RF10), exibida uma única vez por
->   instalação.
-> - **Gestão de Pesquisas** — CRUD de pesquisas, metadados (título, descrição,
->   tipo, estilo de perguntas) editáveis pelo Gestor/Administrador, publicação
->   versionada do schema do formulário (Contrato C1), arquivamento, duplicação
->   e listagem de versões — implementado no Backend, Web (listagem com
->   filtros, criação, edição, publicação e histórico de versões) e Mobile
->   (lista de todas as pesquisas `PUBLISHED` da organização, com cache
->   offline do schema no SQLite, crítico para o Contrato C3; não existe mais
->   atribuição manual de pesquisador por pesquisa — decisão de produto: a
->   coleta de campo não depende disso).
-> - **Construtor de Pesquisas e Form Renderer** — desnormalização de
->   `Question`/`QuestionOption` ao publicar (Backend); construtor visual de
->   formulários na Web com todos os 8 tipos de campo do MVP, reordenação por
->   arrastar-e-soltar (`dnd-kit`), seções, prévia ao vivo e o checkbox
->   "Reaproveitar valor durante a sessão de coleta" (RF11); `FormRenderer` no
->   Mobile que lê o schema em cache (incluindo título/descrição da pesquisa) e
->   renderiza todos os tipos de campo, com validação de obrigatórios,
->   navegação entre seções e rascunho salvo/restaurado no SQLite.
-> - **Coleta** — `POST /api/v1/sync` (idempotência por UUID, validação por
->   versão do formulário e de relógio — Contratos C3/C4 —, persistência de
->   Response/Answer/Location/SyncRecord) no Backend; painel operacional com
->   contadores e tabela de respostas filtrável na Web; no Mobile, captura real
->   de GPS ao finalizar uma coleta (só as coordenadas são exibidas — sem
->   mini-mapa, para não depender do tile server público da OSM), gravação da
->   resposta no SQLite com status `PENDING`, tela "Minhas coletas" (agrupada
->   por pesquisa) com sincronização manual, e o Contexto de Sessão de Coleta
->   (RF11) pré-preenchendo perguntas `sessionScoped` entre respostas
->   consecutivas da mesma pesquisa. Captura/armazenamento de fotos não faz
->   mais parte do produto.
-> - **Motor de Sincronização e Dashboard** — detecção de conflito (Contrato
->   C2: mesmo `surveyId` + `collectedAt` exato + mesmo conjunto de `answers`,
->   sem depender de `locationHash`/`respondentId`) dentro do `POST
->   /api/v1/sync`, criando `ConflictRecord` e notificando via fila `pg-boss`
->   (`GET /api/v1/sync/status`, `GET/PATCH /api/v1/conflicts`); `GET
->   /api/v1/analytics/surveys/:id/kpis` calculado ao vivo por agregação
->   direta no Backend (a view materializada `mv_survey_kpis` ainda existe e é
->   atualizada por um job agendado via `pg-boss`, mas não é lida por esse
->   endpoint hoje — mantida para um uso futuro);
->   Dashboard por pesquisa (cards de KPI, série temporal das últimas leituras
->   da própria sessão do navegador, widget de conflitos) e gestão de
->   conflitos (dentro do Painel Operacional de cada pesquisa) com comparação
->   lado a lado e resolução (`KEEP_FIRST`/`KEEP_SECOND`/`DISCARD_BOTH`) na
->   Web; no Mobile, sync
->   automático ao detectar conectividade e retry agendado a cada
->   `sync_retry_interval_minutes` até `sync_max_auto_retries` (depois disso,
->   `FAILED_MANUAL_REQUIRED` + botão manual), com a tela inicial mostrando
->   data/hora da última sincronização, status online/offline e um botão para
->   sincronizar na hora.
-> - **Analytics, Mapas e Relatórios** — Analytics completo no Backend:
->   `responses` (com sort/order), resposta completa por id, `by-researcher`,
->   `by-period` (`date_trunc` em dia/semana/mês) e `locations`, além de
->   `export` (CSV com BOM UTF-8 e separador `;` para abrir corretamente no
->   Excel em pt-BR, ou JSON), síncrono na escala atual do MVP — LGPD:
->   `respondentId` só entra no export com `includePii=true` explícito,
->   registrado no `AuditLog`. Na Web, página de Analytics por pesquisa com
->   filtros (status/pesquisador/período), tabela paginada, gráficos
->   (`BarChart` por pesquisador, `LineChart` por período) e mapa Leaflet com
->   clustering de marcadores e popups — mais a página de detalhe de uma
->   resposta. No Mobile, tela de detalhe de uma coleta local (respostas,
->   localização, status) e notificação local ao concluir um sync automático
->   (`expo-notifications`).
-> - **Testes, segurança e deploy** — no Backend: suíte de testes de
->   integração real contra Postgres (`POST /api/v1/sync` — idempotência, C3,
->   C4), teste de carga sintético do `/sync`, `helmet` + CORS explícito, rate
->   limiting (`@nestjs/throttler`, incluindo os limites de `/sync`,
->   `/auth/login` e `/auth/refresh`), proteção contra enumeração de e-mail no
->   login (tempo de resposta equalizado), export de Analytics em CSV protegido
->   contra injeção de fórmula, log explícito de eventos de segurança (login
->   falho, `REUSE_DETECTED`, revogação de sessão) e Swagger completo em
->   `/api/docs` **fora de produção** (desabilitado quando `NODE_ENV=production`);
->   CI roda migrations, lint, testes unitários e de integração (Postgres/PostGIS
->   de teste) e `npm audit` a cada PR nos três apps. Na Web:
->   página inicial redirecionando para o Dashboard, confirmações antes de
->   ações destrutivas (arquivar pesquisa, revogar sessão, desativar usuário,
->   descartar conflito) e ajustes de responsividade para tablet. No Mobile:
->   teste unitário do cálculo de `location_hash` (Jest/`jest-expo`), e todo
->   aviso ao usuário exibido em popup nativo. Na Infra:
->   `infra/scripts/backup.sh` e `.github/workflows/deploy.yml` (inativo até
->   `VPS_CONFIGURED=true`).
-> - **Correções pós-MVP** — Tailscale rodando como container do próprio
->   Docker Compose (serviço `tailscale`), em vez de instalado direto na
->   máquina (Linux). Atribuição manual de pesquisador por pesquisa foi
->   removida do produto: qualquer PESQUISADOR/VISUALIZADOR da organização vê
->   e coleta qualquer pesquisa `PUBLISHED` (decisão de produto — a coleta de
->   campo não depende de atribuição manual), o que também explica por que o
->   card "Pesquisadores" foi removido da tela de detalhe da pesquisa na Web.
->   Ainda na Web: a aba "Conflitos" saiu da navegação — a gestão de conflitos
->   agora vive dentro do Painel Operacional de cada pesquisa, junto com a
->   tabela de respostas.
->   (Note: "Cabeçalho da pesquisa" é o nome de uma feature diferente, dentro
->   do construtor de formulários — a seção de perguntas do RF11 respondida
->   uma vez por sessão de coleta, ver 1.4/4.4 — não confundir com o card
->   "Metadados" da tela de detalhe da pesquisa, que continua com esse nome.)
->   No Mobile: botão de sincronizar renomeado para "Sincronizar Serviço",
->   centralizado na tela inicial (removido o duplicado em "Minhas coletas")
->   e bloqueado com aviso quando offline; "Ver pesquisas" ganhou ordenação
->   (título/data); uma pesquisa arquivada no Web agora some do dispositivo;
->   a tela de coleta ganhou a possibilidade de revisitar/editar o cabeçalho
->   já preenchido (via seção de cabeçalho e lista de cabeçalhos salvos) e
->   "Limpar dados preenchidos".
->
-> **Fora do alcance deste ambiente** (dependem de hardware físico ou serviços
-> pagos sem credenciais disponíveis para automatizar): build `.apk`/EAS,
-> teste em Androids reais + Tailscale, e os testes manuais de campo (modo
-> avião, retry de upload, conflito entre 2 dispositivos reais) — a lógica por
-> trás de cada um foi implementada e revisada em código, mas não substitui o
-> teste humano em dispositivo real.
-
 ## Como usar este guia
 
 Este guia foi escrito para quem está pegando o projeto pela primeira vez e
@@ -169,13 +44,13 @@ de produção de verdade.
 Instale estas ferramentas **no computador que vai servir de "servidor"**
 (o mesmo computador onde você vai rodar o Backend, o Web e o Docker).
 
-| # | Ferramenta | Para que serve | Como instalar |
-| - | ---------- | --------------- | -------------- |
-| 1 | **Git** | baixar o código-fonte do repositório | Windows/macOS: instalador em <https://git-scm.com/downloads>. Linux (Debian/Ubuntu): `sudo apt install git` |
-| 2 | **Docker + Docker Compose** | subir o Postgres, o Backend e o Web sem instalar cada um manualmente | Windows/macOS: **Docker Desktop**, instalador em <https://www.docker.com/products/docker-desktop/> (já inclui o Compose). Linux: seguir <https://docs.docker.com/engine/install/> para a sua distribuição, depois `sudo usermod -aG docker $USER` e reiniciar a sessão |
-| 3 | **Node.js 24.20.x** | rodar os testes automatizados e o Mobile (Expo) fora do Docker | Recomendado via **nvm** (Node Version Manager) — instalar o nvm em <https://github.com/nvm-sh/nvm#installing-and-updating>, depois, dentro da pasta do projeto: `nvm install` (lê a versão do arquivo `.nvmrc`) |
-| 4 | **Expo Go** (app) | abrir o app Mobile no celular sem precisar compilar um `.apk` | instalar pela Play Store no Android de teste |
-| 5 | **Conta Tailscale** (opcional) | conectar o celular ao computador quando os dois **não** estão na mesma rede Wi-Fi | criar gratuitamente em <https://tailscale.com> — só é necessária se você optar pelo modo Tailscale no passo 1.8. No Linux, o Tailscale roda como um serviço do próprio Docker Compose (`tailscale`, ver `docker-compose.yml`) — não precisa instalar nada além da conta |
+| #   | Ferramenta                     | Para que serve                                                                    | Como instalar                                                                                                                                                                                                                                                           |
+| --- | ------------------------------ | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **Git**                        | baixar o código-fonte do repositório                                              | Windows/macOS: instalador em <https://git-scm.com/downloads>. Linux (Debian/Ubuntu): `sudo apt install git`                                                                                                                                                             |
+| 2   | **Docker + Docker Compose**    | subir o Postgres, o Backend e o Web sem instalar cada um manualmente              | Windows/macOS: **Docker Desktop**, instalador em <https://www.docker.com/products/docker-desktop/> (já inclui o Compose). Linux: seguir <https://docs.docker.com/engine/install/> para a sua distribuição, depois `sudo usermod -aG docker $USER` e reiniciar a sessão  |
+| 3   | **Node.js 24.20.x**            | rodar os testes automatizados e o Mobile (Expo) fora do Docker                    | Recomendado via **nvm** (Node Version Manager) — instalar o nvm em <https://github.com/nvm-sh/nvm#installing-and-updating>, depois, dentro da pasta do projeto: `nvm install` (lê a versão do arquivo `.nvmrc`)                                                         |
+| 4   | **Expo Go** (app)              | abrir o app Mobile no celular sem precisar compilar um `.apk`                     | instalar pela Play Store no Android de teste                                                                                                                                                                                                                            |
+| 5   | **Conta Tailscale** (opcional) | conectar o celular ao computador quando os dois **não** estão na mesma rede Wi-Fi | criar gratuitamente em <https://tailscale.com> — só é necessária se você optar pelo modo Tailscale no passo 1.8. No Linux, o Tailscale roda como um serviço do próprio Docker Compose (`tailscale`, ver `docker-compose.yml`) — não precisa instalar nada além da conta |
 
 Confira se cada ferramenta foi instalada corretamente:
 
@@ -192,13 +67,13 @@ gerencia (edita/desativa/exclui/vê sessões de) usuários **estritamente
 abaixo** dele na hierarquia, nunca do mesmo nível ou acima, nem a si mesmo
 (regra aplicada pelo Backend, não só pela interface):
 
-| Perfil | Pesquisas | Analytics/Conflitos | Usuários | Sessões (aba "Sessões") | Coleta (Mobile) |
-| ------ | --------- | -------------------- | -------- | ------------------------- | ----------------- |
-| **ADMINISTRADOR** | Cria, edita, publica, arquiva, duplica | Vê tudo, resolve conflitos | Cria, edita, desativa, **exclui** | Vê e revoga as de todo mundo abaixo | — (perfil de gestão, não coleta) |
-| **GESTOR** | Cria, edita, publica, arquiva, duplica | Vê tudo, resolve conflitos | Edita/desativa (não cria nem exclui) | Vê e revoga as de todo mundo abaixo | — |
-| **SUPERVISOR** | Só visualiza (lista/detalhe) | Sem acesso | Edita/desativa (não cria nem exclui) | Vê e revoga as de todo mundo abaixo | — |
-| **PESQUISADOR** | Só visualiza as `PUBLISHED` da organização (todas, sem atribuição manual por pesquisador) | Sem acesso | Sem acesso | Só a própria | Coleta e sincroniza qualquer `PUBLISHED` da organização |
-| **VISUALIZADOR** | Só visualiza as `PUBLISHED` da organização (todas, sem atribuição manual por pesquisador) | Sem acesso | Sem acesso | Só a própria | Mesmo acesso de leitura do PESQUISADOR, sem coletar |
+| Perfil            | Pesquisas                                                                                 | Analytics/Conflitos        | Usuários                             | Sessões (aba "Sessões")             | Coleta (Mobile)                                         |
+| ----------------- | ----------------------------------------------------------------------------------------- | -------------------------- | ------------------------------------ | ----------------------------------- | ------------------------------------------------------- |
+| **ADMINISTRADOR** | Cria, edita, publica, arquiva, duplica                                                    | Vê tudo, resolve conflitos | Cria, edita, desativa, **exclui**    | Vê e revoga as de todo mundo abaixo | — (perfil de gestão, não coleta)                        |
+| **GESTOR**        | Cria, edita, publica, arquiva, duplica                                                    | Vê tudo, resolve conflitos | Edita/desativa (não cria nem exclui) | Vê e revoga as de todo mundo abaixo | —                                                       |
+| **SUPERVISOR**    | Só visualiza (lista/detalhe)                                                              | Sem acesso                 | Edita/desativa (não cria nem exclui) | Vê e revoga as de todo mundo abaixo | —                                                       |
+| **PESQUISADOR**   | Só visualiza as `PUBLISHED` da organização (todas, sem atribuição manual por pesquisador) | Sem acesso                 | Sem acesso                           | Só a própria                        | Coleta e sincroniza qualquer `PUBLISHED` da organização |
+| **VISUALIZADOR**  | Só visualiza as `PUBLISHED` da organização (todas, sem atribuição manual por pesquisador) | Sem acesso                 | Sem acesso                           | Só a própria                        | Mesmo acesso de leitura do PESQUISADOR, sem coletar     |
 
 Notas:
 
@@ -237,20 +112,20 @@ cp .env.example .env
 
 Abra o `.env` num editor de texto e revise cada bloco:
 
-| Bloco | Variável | O que fazer no computador pessoal (Modo 1) |
-| ----- | -------- | -------------------------------------------- |
-| Geral | `NODE_ENV` | deixe `development` |
-| Banco de Dados | `POSTGRES_DB`, `POSTGRES_USER` | pode manter os valores de exemplo |
-| Banco de Dados | `POSTGRES_PASSWORD` | troque por qualquer senha (mesmo simples, já que é só local) |
-| Banco de Dados | `DATABASE_URL` | troque só o trecho `CHANGE_ME` pela mesma senha escolhida acima |
-| Autenticação | `JWT_SECRET` | troque por qualquer string aleatória de 32+ caracteres (ex: gere uma com `openssl rand -hex 32`) |
-| URLs públicas | `API_URL`, `NEXT_PUBLIC_API_URL` | deixe `http://localhost/api` **por enquanto** — só precisa virar o IP da rede/Tailscale quando for testar no celular (passo 1.8) |
-| BFF | `BACKEND_INTERNAL_URL` | não mexer — é usado só entre os containers Docker |
-| Mobile | `EXPO_PUBLIC_API_URL` | usado pelo serviço `mobile` do Docker Compose (passo 1.8); fora do Docker, o app lê do `apps/mobile/.env` separado |
-| Mobile | `MOBILE_LAN_IP` | IP Tailscale/LAN do computador (mesmo host de `API_URL`, sem porta) — usado pelo serviço `mobile` para o Metro bundler anunciar um endereço alcançável pelo celular |
-| Mobile | `EXPO_DEV_SERVER_URL` | URL `exp://<MOBILE_LAN_IP>:8081` exibida como QR code na aba **Sessões** do Web, para parear um celular pela primeira vez |
-| Segurança | `CORS_ORIGIN` | deixe `http://localhost:3000` |
-| Administrador | `ADMIN_PASSWORD`, `ADMIN_EMAIL` | deixe em branco — só são usados quando `NODE_ENV=production` (Modos 2 e 3); em desenvolvimento o seed cria as credenciais fixas da tabela abaixo |
+| Bloco          | Variável                         | O que fazer no computador pessoal (Modo 1)                                                                                                                          |
+| -------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Geral          | `NODE_ENV`                       | deixe `development`                                                                                                                                                 |
+| Banco de Dados | `POSTGRES_DB`, `POSTGRES_USER`   | pode manter os valores de exemplo                                                                                                                                   |
+| Banco de Dados | `POSTGRES_PASSWORD`              | troque por qualquer senha (mesmo simples, já que é só local)                                                                                                        |
+| Banco de Dados | `DATABASE_URL`                   | troque só o trecho `CHANGE_ME` pela mesma senha escolhida acima                                                                                                     |
+| Autenticação   | `JWT_SECRET`                     | troque por qualquer string aleatória de 32+ caracteres (ex: gere uma com `openssl rand -hex 32`)                                                                    |
+| URLs públicas  | `API_URL`, `NEXT_PUBLIC_API_URL` | deixe `http://localhost/api` **por enquanto** — só precisa virar o IP da rede/Tailscale quando for testar no celular (passo 1.8)                                    |
+| BFF            | `BACKEND_INTERNAL_URL`           | não mexer — é usado só entre os containers Docker                                                                                                                   |
+| Mobile         | `EXPO_PUBLIC_API_URL`            | usado pelo serviço `mobile` do Docker Compose (passo 1.8); fora do Docker, o app lê do `apps/mobile/.env` separado                                                  |
+| Mobile         | `MOBILE_LAN_IP`                  | IP Tailscale/LAN do computador (mesmo host de `API_URL`, sem porta) — usado pelo serviço `mobile` para o Metro bundler anunciar um endereço alcançável pelo celular |
+| Mobile         | `EXPO_DEV_SERVER_URL`            | URL `exp://<MOBILE_LAN_IP>:8081` exibida como QR code na aba **Sessões** do Web, para parear um celular pela primeira vez                                           |
+| Segurança      | `CORS_ORIGIN`                    | deixe `http://localhost:3000`                                                                                                                                       |
+| Administrador  | `ADMIN_PASSWORD`, `ADMIN_EMAIL`  | deixe em branco — só são usados quando `NODE_ENV=production` (Modos 2 e 3); em desenvolvimento o seed cria as credenciais fixas da tabela abaixo                    |
 
 > Nunca reutilize os valores deste `.env` local em produção — nos Modos 2 e 3
 > cada variável recebe um valor novo e forte (ver as seções correspondentes).
@@ -300,15 +175,15 @@ usuários e três pesquisas — ver credenciais na tabela abaixo.
 
 **Nunca usar estas credenciais em produção.**
 
-| Perfil        | Email                        | Senha             |
-| ------------- | ---------------------------- | ----------------- |
-| ADMINISTRADOR | `admin@fieldsync.dev`        | `admin123456`     |
-| GESTOR        | `gestor@fieldsync.dev`       | `gestor123456`    |
-| SUPERVISOR    | `supervisor@fieldsync.dev`   | `supervisor123`   |
-| VISUALIZADOR  | `visualizador@fieldsync.dev` | `visualizador123` |
-| PESQUISADOR   | `pesquisador01@fieldsync.dev`| `pesquisador123`  |
-| PESQUISADOR   | `pesquisador02@fieldsync.dev`| `pesquisador123`  |
-| PESQUISADOR   | `pesquisador03@fieldsync.dev`| `pesquisador123`  |
+| Perfil        | Email                         | Senha             |
+| ------------- | ----------------------------- | ----------------- |
+| ADMINISTRADOR | `admin@fieldsync.dev`         | `admin123456`     |
+| GESTOR        | `gestor@fieldsync.dev`        | `gestor123456`    |
+| SUPERVISOR    | `supervisor@fieldsync.dev`    | `supervisor123`   |
+| VISUALIZADOR  | `visualizador@fieldsync.dev`  | `visualizador123` |
+| PESQUISADOR   | `pesquisador01@fieldsync.dev` | `pesquisador123`  |
+| PESQUISADOR   | `pesquisador02@fieldsync.dev` | `pesquisador123`  |
+| PESQUISADOR   | `pesquisador03@fieldsync.dev` | `pesquisador123`  |
 
 O seed cria três pesquisas: uma em `DRAFT` ("Levantamento de Pontos de
 Ônibus"), uma `PUBLISHED` sem respostas ("Pesquisa de Satisfação de
@@ -582,18 +457,18 @@ cp .env.example .env
 Ajuste **todas** as variáveis abaixo — não é uma lista opcional, é o que
 diferencia um `.env` de produção de um `.env.example` copiado sem revisar:
 
-| Variável | Valor em produção | Se deixar errado/no padrão do `.env.example`... |
-| -------- | ------------------ | ------------------------------------------------ |
-| `NODE_ENV` | `production` | `prisma db seed` roda o seed de **desenvolvimento** inteiro (todos os usuários de teste + pesquisas de exemplo) contra o banco de produção — sintoma clássico de "apareceram vários usuários que eu não criei" |
-| `GHCR_REPOSITORY` | owner/repo **exato** do GitHub, minúsculo (ex: `joaosilva/fieldsync`) — o mesmo valor que aparece em `.github/workflows/deploy.yml` como `${{ github.repository }}` | `docker compose ... pull` falha com "manifest unknown" (imagem `ghcr.io/seu-usuario/...` não existe) |
-| `VERSION` | uma tag **já publicada** no GHCR (ver 3.2/3.3) — nunca `latest`, o CI nunca publica essa tag | mesma falha de pull acima, mesmo com `GHCR_REPOSITORY` certo |
-| `POSTGRES_PASSWORD` | valor novo e forte (`openssl rand -hex 32`) | banco fica com a senha de exemplo do repositório, pública para quem ler o `.env.example` |
-| `JWT_SECRET` | valor novo e forte (`openssl rand -hex 32`), nunca reaproveitado do ambiente local | tokens de sessão assinados com um segredo conhecido/previsível |
-| `ADMIN_PASSWORD` | senha forte, mínimo 16 caracteres, nunca `admin123456` | Backend recusa subir e o seed recusa rodar (validação em `env.validation.ts`) |
-| `ADMIN_EMAIL` | e-mail real do Administrador (opcional; padrão `admin@fieldsync.local`) | login continua funcionando, só fica com e-mail genérico |
-| `API_URL` / `NEXT_PUBLIC_API_URL` | domínio público (`https://...`) ou IP Tailscale do servidor | Web/Mobile não conseguem falar com o Backend |
-| `CORS_ORIGIN` | URL pública real do Web, nunca `*` nem em branco | Backend recusa (CORS) chamadas do Web em produção, ou fica aberto demais se deixado `*` |
-| `TS_AUTHKEY` | chave do Tailscale, se o servidor usa a VPN (ver serviço `tailscale`) | container `tailscale` sobe mas não entra na tailnet |
+| Variável                          | Valor em produção                                                                                                                                                   | Se deixar errado/no padrão do `.env.example`...                                                                                                                                                                |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NODE_ENV`                        | `production`                                                                                                                                                        | `prisma db seed` roda o seed de **desenvolvimento** inteiro (todos os usuários de teste + pesquisas de exemplo) contra o banco de produção — sintoma clássico de "apareceram vários usuários que eu não criei" |
+| `GHCR_REPOSITORY`                 | owner/repo **exato** do GitHub, minúsculo (ex: `joaosilva/fieldsync`) — o mesmo valor que aparece em `.github/workflows/deploy.yml` como `${{ github.repository }}` | `docker compose ... pull` falha com "manifest unknown" (imagem `ghcr.io/seu-usuario/...` não existe)                                                                                                           |
+| `VERSION`                         | uma tag **já publicada** no GHCR (ver 3.2/3.3) — nunca `latest`, o CI nunca publica essa tag                                                                        | mesma falha de pull acima, mesmo com `GHCR_REPOSITORY` certo                                                                                                                                                   |
+| `POSTGRES_PASSWORD`               | valor novo e forte (`openssl rand -hex 32`)                                                                                                                         | banco fica com a senha de exemplo do repositório, pública para quem ler o `.env.example`                                                                                                                       |
+| `JWT_SECRET`                      | valor novo e forte (`openssl rand -hex 32`), nunca reaproveitado do ambiente local                                                                                  | tokens de sessão assinados com um segredo conhecido/previsível                                                                                                                                                 |
+| `ADMIN_PASSWORD`                  | senha forte, mínimo 16 caracteres, nunca `admin123456`                                                                                                              | Backend recusa subir e o seed recusa rodar (validação em `env.validation.ts`)                                                                                                                                  |
+| `ADMIN_EMAIL`                     | e-mail real do Administrador (opcional; padrão `admin@fieldsync.local`)                                                                                             | login continua funcionando, só fica com e-mail genérico                                                                                                                                                        |
+| `API_URL` / `NEXT_PUBLIC_API_URL` | domínio público (`https://...`) ou IP Tailscale do servidor                                                                                                         | Web/Mobile não conseguem falar com o Backend                                                                                                                                                                   |
+| `CORS_ORIGIN`                     | URL pública real do Web, nunca `*` nem em branco                                                                                                                    | Backend recusa (CORS) chamadas do Web em produção, ou fica aberto demais se deixado `*`                                                                                                                        |
+| `TS_AUTHKEY`                      | chave do Tailscale, se o servidor usa a VPN (ver serviço `tailscale`)                                                                                               | container `tailscale` sobe mas não entra na tailnet                                                                                                                                                            |
 
 > ⚠️ O container `mobile` (Metro bundler do Expo) existe **só** em
 > `docker-compose.dev.yml` e não deveria subir aqui — não é bug se ele não
@@ -635,12 +510,12 @@ o Administrador já existir — e rollback manual se o smoke test pós-deploy
 falhar). Para ativar essa etapa, configure em **Settings → Secrets and
 variables → Actions** do repositório no GitHub:
 
-| Tipo | Nome | Valor |
-| ---- | ---- | ----- |
-| Variable | `VPS_CONFIGURED` | `true` |
-| Secret | `VPS_HOST` | IP ou domínio do servidor |
-| Secret | `VPS_USER` | usuário SSH com acesso a `/opt/fieldsync` |
-| Secret | `VPS_SSH_KEY` | chave privada SSH correspondente |
+| Tipo     | Nome             | Valor                                     |
+| -------- | ---------------- | ----------------------------------------- |
+| Variable | `VPS_CONFIGURED` | `true`                                    |
+| Secret   | `VPS_HOST`       | IP ou domínio do servidor                 |
+| Secret   | `VPS_USER`       | usuário SSH com acesso a `/opt/fieldsync` |
+| Secret   | `VPS_SSH_KEY`    | chave privada SSH correspondente          |
 
 ### 3.4 HTTPS (domínio público)
 
@@ -710,19 +585,19 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml down
 
 ## Solução de problemas comuns
 
-| Sintoma | Causa provável | Como resolver |
-| ------- | --------------- | -------------- |
-| `docker compose ps` mostra algum serviço reiniciando sem parar | variável faltando/errada no `.env` | `docker compose logs -f <serviço>` para ver o erro exato; confira o `.env` contra a tabela do passo 1.2 |
-| Erro "port is already allocated" | outra aplicação já usa a porta 80/3000/3001/5432/9000 | pare a outra aplicação, ou edite a porta do lado esquerdo em `docker-compose.dev.yml` (ex: `'8080:80'`) |
-| `curl http://localhost/api/v1/health` não responde | Backend ainda subindo, ou Nginx não rodando | espere alguns segundos e repita; confira `docker compose ps` |
-| App Mobile mostra erro de rede ao tentar logar | `EXPO_PUBLIC_API_URL` errado, ou celular em rede diferente do computador | revise o passo 1.8; teste primeiro `curl http://<IP>/api/v1/health` de outro dispositivo na mesma rede |
-| `prisma migrate deploy` falha com erro de extensão (postgis/uuid-ossp) | banco subiu antes do `infra/postgres/init.sql` rodar, ou volume antigo sem as extensões | `docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v` (apaga os dados) e repita os passos 1.3-1.4 |
-| Alterei o `.env` mas o container continua com o valor antigo | Docker cacheia as variáveis no momento em que o container sobe | `docker compose up -d --force-recreate <serviço>` |
-| `docker compose down` para os outros containers, mas o `mobile` continua `Up` | `down` sem `-f docker-compose.dev.yml` não enxerga esse serviço (só existe no override de dev) | repita com `-f docker-compose.yml -f docker-compose.dev.yml`, ou `docker compose down --remove-orphans` |
-| Aviso de conflito na porta `5353` ao subir o Docker (Docker Desktop) | `network_mode: host` (usado por `tailscale`/`mobile`) exige o recurso "host networking" do Docker Desktop, que reserva a porta `5353` (mDNS) no host real — outro app que já usa mDNS (ex: Spotify, AirPlay, impressora de rede) disputa a mesma porta | normalmente é só um aviso, não impede o container de subir (confira com `docker compose ps` e `docker compose logs tailscale`); para eliminar o aviso, feche o app que usa mDNS antes de subir o Docker |
-| `docker compose ... pull` falha com "manifest unknown"/"not found" (Modo 3) | `GHCR_REPOSITORY` ainda com o placeholder `seu-usuario/fieldsync`, ou `VERSION` (`latest`) sem imagem publicada com essa tag no GHCR | ajuste `GHCR_REPOSITORY` no `.env` para o owner/repo real do GitHub e `VERSION` para uma tag já publicada, ou rode `build` localmente uma vez (ver 3.2) |
-| Container `mobile` não aparece em produção (Modo 2/3) | comportamento esperado — `mobile` só existe em `docker-compose.dev.yml`, não faz parte do stack de produção | nenhuma ação necessária; o app mobile em produção é um APK/build nativo instalado no celular, não um container |
-| `prisma db seed` criou vários usuários (GESTOR/SUPERVISOR/PESQUISADOR/etc.) em produção | `.env` do servidor está com `NODE_ENV=development` (valor padrão do `.env.example`), então rodou o seed de desenvolvimento | corrija `NODE_ENV=production` no `.env`, suba de novo com `--force-recreate` no backend, e apague manualmente os usuários/pesquisas de exemplo criados por engano (não há rotina automática de limpeza, para não arriscar apagar dado real por engano) |
+| Sintoma                                                                                 | Causa provável                                                                                                                                                                                                                                         | Como resolver                                                                                                                                                                                                                                          |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `docker compose ps` mostra algum serviço reiniciando sem parar                          | variável faltando/errada no `.env`                                                                                                                                                                                                                     | `docker compose logs -f <serviço>` para ver o erro exato; confira o `.env` contra a tabela do passo 1.2                                                                                                                                                |
+| Erro "port is already allocated"                                                        | outra aplicação já usa a porta 80/3000/3001/5432/9000                                                                                                                                                                                                  | pare a outra aplicação, ou edite a porta do lado esquerdo em `docker-compose.dev.yml` (ex: `'8080:80'`)                                                                                                                                                |
+| `curl http://localhost/api/v1/health` não responde                                      | Backend ainda subindo, ou Nginx não rodando                                                                                                                                                                                                            | espere alguns segundos e repita; confira `docker compose ps`                                                                                                                                                                                           |
+| App Mobile mostra erro de rede ao tentar logar                                          | `EXPO_PUBLIC_API_URL` errado, ou celular em rede diferente do computador                                                                                                                                                                               | revise o passo 1.8; teste primeiro `curl http://<IP>/api/v1/health` de outro dispositivo na mesma rede                                                                                                                                                 |
+| `prisma migrate deploy` falha com erro de extensão (postgis/uuid-ossp)                  | banco subiu antes do `infra/postgres/init.sql` rodar, ou volume antigo sem as extensões                                                                                                                                                                | `docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v` (apaga os dados) e repita os passos 1.3-1.4                                                                                                                                   |
+| Alterei o `.env` mas o container continua com o valor antigo                            | Docker cacheia as variáveis no momento em que o container sobe                                                                                                                                                                                         | `docker compose up -d --force-recreate <serviço>`                                                                                                                                                                                                      |
+| `docker compose down` para os outros containers, mas o `mobile` continua `Up`           | `down` sem `-f docker-compose.dev.yml` não enxerga esse serviço (só existe no override de dev)                                                                                                                                                         | repita com `-f docker-compose.yml -f docker-compose.dev.yml`, ou `docker compose down --remove-orphans`                                                                                                                                                |
+| Aviso de conflito na porta `5353` ao subir o Docker (Docker Desktop)                    | `network_mode: host` (usado por `tailscale`/`mobile`) exige o recurso "host networking" do Docker Desktop, que reserva a porta `5353` (mDNS) no host real — outro app que já usa mDNS (ex: Spotify, AirPlay, impressora de rede) disputa a mesma porta | normalmente é só um aviso, não impede o container de subir (confira com `docker compose ps` e `docker compose logs tailscale`); para eliminar o aviso, feche o app que usa mDNS antes de subir o Docker                                                |
+| `docker compose ... pull` falha com "manifest unknown"/"not found" (Modo 3)             | `GHCR_REPOSITORY` ainda com o placeholder `seu-usuario/fieldsync`, ou `VERSION` (`latest`) sem imagem publicada com essa tag no GHCR                                                                                                                   | ajuste `GHCR_REPOSITORY` no `.env` para o owner/repo real do GitHub e `VERSION` para uma tag já publicada, ou rode `build` localmente uma vez (ver 3.2)                                                                                                |
+| Container `mobile` não aparece em produção (Modo 2/3)                                   | comportamento esperado — `mobile` só existe em `docker-compose.dev.yml`, não faz parte do stack de produção                                                                                                                                            | nenhuma ação necessária; o app mobile em produção é um APK/build nativo instalado no celular, não um container                                                                                                                                         |
+| `prisma db seed` criou vários usuários (GESTOR/SUPERVISOR/PESQUISADOR/etc.) em produção | `.env` do servidor está com `NODE_ENV=development` (valor padrão do `.env.example`), então rodou o seed de desenvolvimento                                                                                                                             | corrija `NODE_ENV=production` no `.env`, suba de novo com `--force-recreate` no backend, e apague manualmente os usuários/pesquisas de exemplo criados por engano (não há rotina automática de limpeza, para não arriscar apagar dado real por engano) |
 
 Mais detalhes de arquitetura, contratos entre módulos (C1-C4), schema de dados
 e contrato de API estão na
