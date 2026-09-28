@@ -1,0 +1,84 @@
+# Uso: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+
+services:
+  backend:
+    build:
+      target: builder
+    # O Prisma Client fica no volume anônimo /app/node_modules, gerado a
+    # partir do schema.prisma que existia quando a IMAGEM foi construída.
+    # Sempre que o container é recriado (down/up, up --build) esse volume
+    # volta a ser inicializado com aquele client "congelado" — se novas
+    # migrations/campos foram adicionados desde então (bind mount do
+    # schema.prisma já reflete a mudança, mas o client gerado não), qualquer
+    # query nesses campos falha com P2022 ("column does not exist"), mesmo
+    # com o banco em dia. `prisma generate` é idempotente e rápido — rodar
+    # antes de subir evita depender de alguém lembrar de rodá-lo manualmente
+    # após recriar o container.
+    command: sh -c "npx prisma generate && npm run start:dev" # hot reload
+    volumes:
+      - ./apps/backend:/app
+      - /app/node_modules
+    environment:
+      NODE_ENV: development
+      # Bind mount pode perder eventos de save do editor (ex: escrita
+      # atômica via arquivo temporário + rename) — polling garante que o
+      # nest --watch sempre detecte a mudança, ao custo de um pouco de CPU.
+      CHOKIDAR_USEPOLLING: 'true'
+    ports:
+      - '3001:3001'
+
+  web:
+    build:
+      target: builder
+    command: npm run dev
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+      # Lido por GET /api/config (QR de pareamento do Expo) — escrito pelo
+      # serviço `mobile`, que resolve o IP atual do Tailscale sozinho (ver
+      # apps/mobile/docker-entrypoint.sh). Somente leitura aqui: quem escreve
+      # é sempre o `mobile`.
+      - tailscale_ip_export:/shared-ip:ro
+    environment:
+      NODE_ENV: development
+      # Mesmo motivo do backend acima, mas para o watcher do Next.js/Turbopack.
+      WATCHPACK_POLLING: 'true'
+    ports:
+      - '3000:3000'
+
+  postgres:
+    ports:
+      - '5432:5432' # acesso via DBeaver / TablePlus
+
+  # ── App Mobile (dev server) ─────────────────────────────────
+  # Sobe junto com backend/web via `docker compose -f docker-compose.yml -f
+  # docker-compose.dev.yml up -d` — não precisa mais rodar `npx expo start`
+  # separadamente depois. network_mode: host (só Linux) é necessário para o
+  # Metro bundler ficar acessível no IP real da máquina (Tailscale/LAN),
+  # senão o QR/URL gerados apontariam para o IP interno do container, que o
+  # celular não alcança. Em Docker Desktop (macOS/Windows), host networking
+  # não é suportado do mesmo jeito — nesses casos, rode `npm start` dentro
+  # de apps/mobile fora do Docker em vez deste serviço.
+  mobile:
+    build:
+      context: ./apps/mobile
+      dockerfile: Dockerfile
+    container_name: fieldsync_mobile
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      # Valores de fallback, usados só se a resolução automática do IP do
+      # Tailscale (docker-entrypoint.sh, via o socket do tailscaled
+      # compartilhado abaixo) falhar — ver comentário lá.
+      EXPO_PUBLIC_API_URL: ${EXPO_PUBLIC_API_URL}
+      REACT_NATIVE_PACKAGER_HOSTNAME: ${MOBILE_LAN_IP}
+    volumes:
+      - ./apps/mobile:/app
+      - /app/node_modules
+      - /app/.expo
+      # Socket do tailscaled (serviço `tailscale`) — permite rodar `tailscale
+      # ip -4` localmente sem `docker exec`/acesso ao socket do Docker.
+      - tailscale_run:/var/run/tailscale:ro
+      # Onde este container escreve o IP resolvido, para o Web (GET
+      # /api/config) também usar no QR code de pareamento.
+      - tailscale_ip_export:/shared-ip

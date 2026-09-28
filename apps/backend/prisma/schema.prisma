@@ -1,0 +1,389 @@
+// FieldSync — schema.prisma
+// ORM: Prisma
+// Banco: PostgreSQL 16 + PostGIS 3.4
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [postgis, uuidOssp(map: "uuid-ossp"), pgTrgm(map: "pg_trgm")]
+}
+
+// ─────────────────────────────────────────────
+// ORGANIZAÇÃO — single-tenant no MVP
+// Estrutura mantida para futura migração multi-tenant sem reescrita de schema
+// ─────────────────────────────────────────────
+
+model Organization {
+  id        String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  name      String
+  slug      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users    User[]
+  surveys  Survey[]
+  devices  Device[]
+
+  @@map("organizations")
+}
+
+// ─────────────────────────────────────────────
+// USUÁRIOS E SESSÕES
+// ─────────────────────────────────────────────
+
+enum UserRole {
+  ROOT           // reservado ao(s) mantenedor(es) do sistema — nunca atribuído via API
+  ADMINISTRADOR
+  GESTOR
+  SUPERVISOR
+  PESQUISADOR
+  VISUALIZADOR
+}
+
+model User {
+  id             String       @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  organizationId String       @db.Uuid
+  name           String
+  email          String       @unique
+  passwordHash   String
+  role           UserRole     @default(PESQUISADOR)
+  isActive       Boolean      @default(true)
+  // Usuário-raiz do bootstrap (seed) — nunca pode ser desativado ou
+  // excluído, por ninguém (nem por si mesmo). Não é o enum UserRole.ROOT
+  // (que travaria em toda rota com @Roles(ADMINISTRADOR, ...), uma
+  // allowlist exata, não hierárquica) — este usuário continua ADMINISTRADOR
+  // normalmente, só ganha essa proteção extra.
+  isRootAdmin    Boolean      @default(false)
+  lastLoginAt    DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization   Organization  @relation(fields: [organizationId], references: [id])
+  refreshTokens  RefreshToken[]
+  devices        Device[]
+  responses      Response[]
+  auditLogs      AuditLog[]
+  createdSurveys Survey[]      @relation("SurveyCreator")
+
+  @@index([organizationId])
+  @@index([email])
+  @@map("users")
+}
+
+model RefreshToken {
+  id                  String    @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  userId              String    @db.Uuid
+  deviceId            String
+  deviceName          String?
+  platform            String?   // "android" | "ios" | "web"
+  tokenHash           String
+  expiresAt           DateTime
+  revokedAt           DateTime?   // NULL = ativo; preenchido = revogado
+  revokeReason        String?     // "MANUAL" | "ROTATED" | "REUSE_DETECTED" — ver 2.2
+  replacedByTokenHash String?     // token que substituiu este, via rotação — ver 2.2
+  createdAt           DateTime  @default(now())
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([deviceId])
+  @@index([tokenHash])
+  @@map("refresh_tokens")
+}
+
+model Device {
+  id             String       @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  organizationId String       @db.Uuid
+  // Opcional + SetNull: excluir um pesquisador (ver UsersService.remove) não
+  // pode ficar bloqueado pelos dispositivos que ele já usou para coletar
+  // respostas (Response.deviceId é obrigatório e não pode ser apagado em
+  // cascata) — o device permanece, só perde o dono. Mesmo padrão de
+  // Response.researcherId.
+  userId         String?      @db.Uuid
+  deviceIdentifier String     @unique  // UUID gerado no primeiro login do app
+  deviceName     String?
+  platform       String?
+  appVersion     String?
+  lastSeenAt     DateTime?
+  createdAt      DateTime     @default(now())
+
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  user           User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  responses      Response[]
+
+  @@index([organizationId])
+  @@index([userId])
+  @@map("devices")
+}
+
+// ─────────────────────────────────────────────
+// PESQUISAS E VERSIONAMENTO
+// ─────────────────────────────────────────────
+
+enum SurveyStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+model Survey {
+  id             String       @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  organizationId String       @db.Uuid
+  createdById    String       @db.Uuid
+  title          String
+  description    String?
+  type           String?      // Categoria livre definida pelo Gestor (ex: "Censo", "Satisfação") — metadado descritivo, não um enum fixo.
+  questionStyle  String?      // Estilo predominante das perguntas (ex: "Likert", "Aberta") — também livre, definido pelo Gestor.
+  status         SurveyStatus @default(DRAFT)
+  currentVersion Int          @default(0)
+  startsAt       DateTime?
+  endsAt         DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization   Organization   @relation(fields: [organizationId], references: [id])
+  createdBy      User           @relation("SurveyCreator", fields: [createdById], references: [id])
+  versions       SurveyVersion[]
+  responses      Response[]
+  syncRecords    SyncRecord[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt(sort: Desc)])
+  @@map("surveys")
+}
+
+model SurveyVersion {
+  id          String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  surveyId    String   @db.Uuid
+  version     Int
+  schema      Json     // contrato C1 completo — armazenado como JSONB
+  publishedAt DateTime @default(now())
+  publishedBy String   @db.Uuid
+
+  survey      Survey     @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+  questions   Question[]
+  responses   Response[]
+
+  @@unique([surveyId, version])
+  @@index([surveyId])
+  @@map("survey_versions")
+}
+
+// ─────────────────────────────────────────────
+// PERGUNTAS (desnormalizado ao publicar para leitura rápida)
+// ─────────────────────────────────────────────
+
+enum QuestionType {
+  TEXT
+  NUMBER
+  BOOLEAN
+  SINGLE_CHOICE
+  MULTIPLE_CHOICE
+  DATE
+  TIME
+  GPS
+}
+
+model Question {
+  id              String       @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  surveyVersionId String       @db.Uuid
+  externalId      String       // "q1", "q2" — id do JSON do construtor
+  type            QuestionType
+  label           String
+  isRequired      Boolean      @default(false)
+  orderIndex      Int
+  sectionId       String?
+  sectionTitle    String?
+  // Denormalizado de section.isHeader (ver survey-schema.validator.ts) — o
+  // Detalhe da Resposta usa para separar "Cabeçalho" (preenchido uma vez por
+  // sessão) das perguntas de campo, sem precisar reparsear o schema JSON.
+  isHeader        Boolean      @default(false)
+  config          Json?        // configurações específicas por tipo
+
+  surveyVersion   SurveyVersion    @relation(fields: [surveyVersionId], references: [id], onDelete: Cascade)
+  options         QuestionOption[]
+  answers         Answer[]
+
+  @@index([surveyVersionId])
+  @@map("questions")
+}
+
+model QuestionOption {
+  id         String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  questionId String   @db.Uuid
+  label      String
+  value      String
+  orderIndex Int
+
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@index([questionId])
+  @@map("question_options")
+}
+
+// ─────────────────────────────────────────────
+// RESPOSTAS E COLETAS
+// ─────────────────────────────────────────────
+
+enum ResponseStatus {
+  SYNCED
+  CONFLICT
+  ERROR
+}
+
+model Response {
+  id              String         @id @db.Uuid  // UUID gerado NO dispositivo (idempotency key)
+  surveyId        String         @db.Uuid
+  surveyVersionId String         @db.Uuid      // versão no momento da coleta (Contrato C3)
+  // Opcional + SetNull: excluir um pesquisador (ver UsersService.remove) não
+  // pode apagar nem bloquear a exclusão de respostas já coletadas por ele —
+  // a pesquisa e as respostas permanecem intactas, só perdem a referência ao
+  // autor. Mesmo padrão já usado em AuditLog.userId.
+  researcherId    String?        @db.Uuid
+  deviceId        String         @db.Uuid
+  respondentId    String?        // identificador externo do entrevistado
+  status          ResponseStatus @default(SYNCED)
+  locationHash    String?        // hash de coordenadas para detecção de conflito (C2)
+  collectedAt     DateTime       // timestamp do DISPOSITIVO, não do servidor
+  syncedAt        DateTime       @default(now())
+
+  survey          Survey         @relation(fields: [surveyId], references: [id])
+  surveyVersion   SurveyVersion  @relation(fields: [surveyVersionId], references: [id])
+  researcher      User?          @relation(fields: [researcherId], references: [id], onDelete: SetNull)
+  device          Device         @relation(fields: [deviceId], references: [id])
+  answers         Answer[]
+  location        Location?
+  syncRecord      SyncRecord?
+  conflict        ConflictRecord? @relation("ConflictResponse")
+  conflictWith    ConflictRecord[] @relation("ConflictWithResponse")
+
+  // Índices para queries analíticas — ver 2.10
+  @@index([surveyId, collectedAt(sort: Desc)])
+  @@index([researcherId, surveyId, collectedAt(sort: Desc)])
+  @@index([surveyVersionId])
+  @@index([status])
+  @@map("responses")
+}
+
+model Answer {
+  id         String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  responseId String   @db.Uuid
+  questionId String   @db.Uuid
+  value      Json     // TEXT → string; NUMBER → number; GPS → {lat,lng}; MULTIPLE_CHOICE → string[]
+
+  response   Response @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  question   Question @relation(fields: [questionId], references: [id])
+
+  @@unique([responseId, questionId])
+  @@index([questionId, responseId])
+  @@map("answers")
+}
+
+// ─────────────────────────────────────────────
+// LOCALIZAÇÃO (PostGIS)
+// ─────────────────────────────────────────────
+
+model Location {
+  id          String                  @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  responseId  String                  @unique @db.Uuid
+  latitude    Float
+  longitude   Float
+  accuracy    Float?                  // metros
+  altitude    Float?
+  coordinates Unsupported("geometry(Point, 4326)")?  // PostGIS
+  capturedAt  DateTime
+
+  response    Response @relation(fields: [responseId], references: [id], onDelete: Cascade)
+
+  @@map("locations")
+}
+
+// ─────────────────────────────────────────────
+// ARQUIVOS
+// ─────────────────────────────────────────────
+
+// ─────────────────────────────────────────────
+// SINCRONIZAÇÃO
+// ─────────────────────────────────────────────
+
+enum SyncStatus {
+  SYNCED
+  ALREADY_SYNCED
+  CONFLICT
+  ERROR
+}
+
+model SyncRecord {
+  id          String     @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  responseId  String     @unique @db.Uuid
+  surveyId    String     @db.Uuid
+  deviceId    String
+  status      SyncStatus
+  errorReason String?
+  syncedAt    DateTime   @default(now())
+
+  response    Response   @relation(fields: [responseId], references: [id])
+  survey      Survey     @relation(fields: [surveyId], references: [id])
+
+  @@index([surveyId, status])
+  @@map("sync_records")
+}
+
+enum ConflictStatus {
+  PENDING
+  RESOLVED
+}
+
+enum ConflictResolution {
+  KEEP_FIRST
+  KEEP_SECOND
+  DISCARD_BOTH
+}
+
+model ConflictRecord {
+  id               String              @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  responseId       String              @unique @db.Uuid    // resposta que causou o conflito
+  conflictWithId   String              @db.Uuid            // resposta já existente
+  status           ConflictStatus      @default(PENDING)
+  resolution       ConflictResolution?
+  resolvedById     String?             @db.Uuid
+  resolvedAt       DateTime?
+  detectedAt       DateTime            @default(now())
+
+  response         Response            @relation("ConflictResponse",     fields: [responseId],     references: [id])
+  conflictWith     Response            @relation("ConflictWithResponse", fields: [conflictWithId], references: [id])
+
+  @@index([status])
+  @@map("conflict_records")
+}
+
+// ─────────────────────────────────────────────
+// AUDITORIA
+// ─────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  userId     String?  @db.Uuid
+  action     String   // "SURVEY_PUBLISHED", "CONFLICT_RESOLVED", "USER_CREATED"
+  entityType String   // "Survey", "Response", "User"
+  entityId   String?
+  metadata   Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  // SetNull: excluir um usuário (ver UsersService.remove) não deve apagar
+  // o histórico de auditoria — o log sobrevive, só perde a referência.
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@map("audit_logs")
+}

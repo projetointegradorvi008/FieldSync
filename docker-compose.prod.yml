@@ -1,0 +1,40 @@
+services:
+  backend:
+    # Precisa bater com o que `.github/workflows/deploy.yml` publica
+    # (ghcr.io/${{ github.repository }}/backend) — configure GHCR_REPOSITORY
+    # no .env com o owner/repo real do GitHub, nunca deixe "seu-org/...".
+    image: ghcr.io/${GHCR_REPOSITORY}/backend:${VERSION}
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  web:
+    image: ghcr.io/${GHCR_REPOSITORY}/web:${VERSION}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  postgres:
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # Monitoramento (apenas em produção)
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: fieldsync_monitoring
+    restart: unless-stopped
+    volumes:
+      - uptime_kuma_data:/app/data
+    ports:
+      - '3002:3001'
+    networks:
+      - fieldsync_internal
+
+volumes:
+  uptime_kuma_data:

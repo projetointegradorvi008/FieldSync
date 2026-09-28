@@ -1,0 +1,140 @@
+name: fieldsync
+
+services:
+  # ── Tailscale ────────────────────────────────────────────────
+  # Coloca a própria máquina host no tailnet a partir de dentro do Docker,
+  # em vez de exigir `tailscale up` instalado direto no sistema operacional.
+  # network_mode: host (só Linux — mesmo motivo do serviço `mobile` em
+  # docker-compose.dev.yml): é o que dá ao container acesso à interface de
+  # rede real da máquina para criar a interface `tailscale0` que o celular
+  # de campo alcança pelo IP 100.x definido em MOBILE_LAN_IP/API_URL. Em
+  # macOS/Windows (Docker Desktop), instale o Tailscale direto no host em
+  # vez de usar este serviço — network_mode: host não funciona do mesmo
+  # jeito nesses sistemas.
+  tailscale:
+    image: tailscale/tailscale:stable
+    container_name: fieldsync_tailscale
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY}
+      TS_HOSTNAME: fieldsync
+      TS_STATE_DIR: /var/lib/tailscale
+      # Por padrão o tailscaled cria o socket em /tmp/tailscaled.sock e só
+      # deixa um symlink em /var/run/tailscale/tailscaled.sock apontando pra
+      # lá — como /tmp não é compartilhado com o serviço `mobile` (só
+      # /var/run/tailscale, via o volume tailscale_run abaixo), esse symlink
+      # fica quebrado nos outros containers e `[ -S "$SOCKET" ]` em
+      # apps/mobile/docker-entrypoint.sh sempre falha. Forçar o socket real a
+      # nascer dentro do próprio diretório compartilhado resolve isso.
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+    volumes:
+      - tailscale_state:/var/lib/tailscale
+      # Socket de controle do tailscaled, compartilhado com o serviço
+      # `mobile` (docker-compose.dev.yml) para resolver o IP atual do
+      # Tailscale sem precisar de `docker exec`/acesso ao socket do Docker —
+      # ver apps/mobile/docker-entrypoint.sh.
+      - tailscale_run:/var/run/tailscale
+
+  # ── Banco de dados ──────────────────────────────────────────
+  postgres:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: fieldsync_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - fieldsync_internal
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Backend ─────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./apps/backend
+      dockerfile: Dockerfile
+      target: production
+    container_name: fieldsync_backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - fieldsync_internal
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3001/api/v1/health']
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ── Front-End Web ────────────────────────────────────────────
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      target: production
+    container_name: fieldsync_web
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NEXT_PUBLIC_API_URL: ${API_URL}
+      BACKEND_INTERNAL_URL: http://backend:3001
+      EXPO_DEV_SERVER_URL: ${EXPO_DEV_SERVER_URL}
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - fieldsync_internal
+
+  # ── Proxy Reverso ────────────────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: fieldsync_nginx
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/certs:/etc/nginx/certs:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - web
+      - backend
+    networks:
+      - fieldsync_internal
+      - fieldsync_external
+
+volumes:
+  postgres_data:
+  nginx_logs:
+  tailscale_state:
+  tailscale_run:
+  # IP do Tailscale resolvido pelo serviço `mobile` (docker-compose.dev.yml),
+  # lido pelo Web (GET /api/config) para o QR code de pareamento sempre
+  # apontar para o IP atual, mesmo que ele mude entre reinícios — ver
+  # apps/mobile/docker-entrypoint.sh e apps/web/src/app/api/config/route.ts.
+  tailscale_ip_export:
+
+networks:
+  fieldsync_internal:
+    driver: bridge
+  fieldsync_external:
+    driver: bridge

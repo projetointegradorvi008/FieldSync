@@ -1,0 +1,38 @@
+# ── Segredos ─────────────────────────────────────────────────
+.env
+infra/nginx/certs/*
+!infra/nginx/certs/.gitkeep
+
+# ── Node ─────────────────────────────────────────────────────
+node_modules/
+dist/
+build/
+.next/
+out/
+coverage/
+*.log
+npm-debug.log*
+
+# ── Prisma ───────────────────────────────────────────────────
+apps/backend/prisma/migrations/**/migration_lock.toml.bak
+
+# ── Expo / React Native ─────────────────────────────────────
+.expo/
+.expo-shared/
+apps/mobile/android/
+apps/mobile/ios/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# ── Editor / SO ──────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Backups locais (nunca commitar dumps) ───────────────────
+infra/scripts/backups/
+*.dump
